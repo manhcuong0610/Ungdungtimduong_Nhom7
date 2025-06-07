@@ -15,7 +15,7 @@ except FileNotFoundError:
 
 # Tạo đồ thị từ OpenStreetMap
 G = ox.graph_from_place("Điện Biên, Ba Đình, Hà Nội, Vietnam")
-max_length = 6
+max_length = 15
 nodes = dict()
 
 cnt = 0
@@ -32,7 +32,13 @@ def calculate_distance(pa, pb):
     lat2, lon2 = pb
     lat1, lon1 = radians(lat1), radians(lon1)
     lat2, lon2 = radians(lat2), radians(lon2)
-    return acos(sin(lat1)*sin(lat2)+cos(lat1)*cos(lat2)*cos(lon2-lon1))*6371000
+    # Tính toán giá trị cho acos
+    arg = sin(lat1)*sin(lat2) + cos(lat1)*cos(lat2)*cos(lon2-lon1)
+
+    # Giới hạn giá trị trong khoảng [-1, 1]
+    arg = max(min(arg, 1.0), -1.0)
+
+    return acos(arg)*6371000
 
 def add_edge(node1, node2):
     global G

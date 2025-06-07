@@ -11,7 +11,14 @@ def calculate_distance(pa,pb): # Calculate distance between two points
     lat2, lon2 = pb
     lat1, lon1 = radians(lat1), radians(lon1)
     lat2, lon2 = radians(lat2), radians(lon2)
-    return acos(sin(lat1)*sin(lat2)+cos(lat1)*cos(lat2)*cos(lon2-lon1))*6371000
+    
+    # Tính toán giá trị cho acos
+    arg = sin(lat1)*sin(lat2) + cos(lat1)*cos(lat2)*cos(lon2-lon1)
+    
+    # Giới hạn giá trị trong khoảng [-1, 1]
+    arg = max(min(arg, 1.0), -1.0)
+    
+    return acos(arg)*6371000
 
 # Configure OSMnx
 ox.settings.log_console = True
@@ -65,26 +72,56 @@ def Astar_algorithm(pointA, pointB):
     father[pointA] = -432
     res = defaultdict(int)
     res[pointA] = 0
+    visited = set()
+    path_info = defaultdict(list)
+    edge_visited = set()  # Theo dõi các cạnh đã đi
+    
     while queue:
         current_cost, current_node = heappop(queue)
+        
+        if current_node in visited:
+            continue
+            
+        visited.add(current_node)
+        
         if current_node == pointB:
             break
+            
         for neighbor, cost in graph[current_node]:
+            # Kiểm tra cạnh đã đi chưa
+            edge = tuple(sorted([current_node, neighbor]))
+            if edge in edge_visited:
+                continue
+                
+            if neighbor in visited:
+                continue
+                
             g = current_cost + cost
             h = calculate_distance(nodes[neighbor], nodes[pointB])
             f = g + h
+            
             if neighbor not in father or f < res[neighbor]:
                 heappush(queue, (f, neighbor))
                 father[neighbor] = current_node
                 res[neighbor] = f
+                path_info[neighbor] = path_info[current_node] + [(current_node, neighbor, cost)]
+                edge_visited.add(edge)
     distance = res[pointB]
     path = []
+    total_distance = 0
     while father[pointB] != -432:
         path.append(pointB)
+        total_distance += res[pointB] - res[father[pointB]]
         pointB = father[pointB]
     path.append(pointA)
     path.reverse()
-    return distance, path
+    
+    return {
+        'distance': total_distance,
+        'path': path,
+        'visited_nodes': len(visited),
+        'path_info': path_info[pointB] if pointB in path_info else []
+    }
 
 for idx, point in enumerate(st.session_state['points']):
     folium.Marker(location=point, tooltip=f"Point {idx+1}",icon=folium.Icon("blue")).add_to(m)
@@ -98,7 +135,7 @@ if len(st.session_state['points']) == 2:
     orig_node = ox.nearest_nodes(G,orig[1], orig[0])
     dest_node = ox.nearest_nodes(G,dest[1], dest[0])
     
-    route = Astar_algorithm(orig_node, dest_node)[1]
+    route = Astar_algorithm(orig_node, dest_node)['path']
     
 
     # Extract the edge geometries for the route
@@ -136,5 +173,4 @@ if st.button("Reset Points"):
     st.session_state['zoom'] = DEFAULT_ZOOM
     st.session_state['center'] = DEFAULT_LOCATION
     st.rerun()
-
 
