@@ -35,15 +35,31 @@ from collections import defaultdict
 # Function to load or create the graph
 @st.cache_resource
 def load_graph():
-    G = ox.load_graphml(GRAPHML_FILE)
+    # Tải lại đồ thị với network_type='drive' để chỉ bao gồm đường cho xe chạy
+    st.info("Đang tải và xử lý lại dữ liệu bản đồ (chỉ bao gồm đường cho xe chạy)...")
+    place_name = "Phường Điện Biên, Quận Ba Đình, Hà Nội, Việt Nam"
     
+    # Lấy mạng lưới đường cho xe chạy (dạng có hướng để xử lý đường 1 chiều)
+    G_drive = ox.graph_from_place(place_name, network_type='drive', simplify=True)
+    
+    # Chuyển thành đồ thị vô hướng để phù hợp với thuật toán A* hiện tại
+    G = G_drive.to_undirected()
+    
+    # Lưu lại đồ thị mới đã được lọc
+    ox.save_graphml(G, filepath=GRAPHML_FILE)
+    
+    # Xây dựng adjacency list cho A*
     graph = defaultdict(list)
-    for edge in G.edges(data=True):
-        graph[edge[0]].append((edge[1], edge[2]['length']))
-        graph[edge[1]].append((edge[0], edge[2]['length']))
+    for u, v, data in G.edges(data=True):
+        length = data.get('length', 0)
+        graph[u].append((v, length))
+        graph[v].append((u, length))
+
     nodes = dict()
-    for node in G.nodes(data=True):
-        nodes[node[0]] = (node[1]['y'],node[1]['x'])
+    for node, data in G.nodes(data=True):
+        nodes[node] = (data['y'], data['x'])
+        
+    st.success("Đã tải xong bản đồ mới!")
     return G, graph, nodes
 G, graph, nodes = load_graph()
 
@@ -51,6 +67,10 @@ G, graph, nodes = load_graph()
 
 if 'points' not in st.session_state:
     st.session_state['points'] = []
+if 'forbidden_points' not in st.session_state:
+    st.session_state['forbidden_points'] = []
+if 'forbidden_edges' not in st.session_state:
+    st.session_state['forbidden_edges'] = set()
 if 'zoom' not in st.session_state:
     st.session_state['zoom'] = DEFAULT_ZOOM
 if 'center' not in st.session_state:
@@ -75,6 +95,7 @@ def Astar_algorithm(pointA, pointB):
     visited = set()
     path_info = defaultdict(list)
     edge_visited = set()  # Theo dõi các cạnh đã đi
+    forbidden_edges = st.session_state.get('forbidden_edges', set())
     
     while queue:
         current_cost, current_node = heappop(queue)
@@ -88,9 +109,20 @@ def Astar_algorithm(pointA, pointB):
             break
             
         for neighbor, cost in graph[current_node]:
-            # Kiểm tra cạnh đã đi chưa
-            edge = tuple(sorted([current_node, neighbor]))
-            if edge in edge_visited:
+            # Kiểm tra cạnh đã đi
+            edge_tuple_ids = tuple(sorted([current_node, neighbor]))
+            if edge_tuple_ids in edge_visited:
+                continue
+
+            # Kiểm tra cạnh có giao với đường cấm không
+            is_forbidden = False
+            current_edge_line = LineString([nodes[current_node], nodes[neighbor]])
+            for forbidden_coord_pair in forbidden_edges:
+                forbidden_line = LineString(forbidden_coord_pair)
+                if current_edge_line.crosses(forbidden_line) or current_edge_line.touches(forbidden_line) or current_edge_line.equals(forbidden_line):
+                    is_forbidden = True
+                    break
+            if is_forbidden:
                 continue
                 
             if neighbor in visited:
@@ -105,7 +137,7 @@ def Astar_algorithm(pointA, pointB):
                 father[neighbor] = current_node
                 res[neighbor] = f
                 path_info[neighbor] = path_info[current_node] + [(current_node, neighbor, cost)]
-                edge_visited.add(edge)
+                edge_visited.add(edge_tuple_ids)
     distance = res[pointB]
     path = []
     total_distance = 0
@@ -123,19 +155,20 @@ def Astar_algorithm(pointA, pointB):
         'path_info': path_info[pointB] if pointB in path_info else []
     }
 
-for idx, point in enumerate(st.session_state['points']):
-    folium.Marker(location=point, tooltip=f"Point {idx+1}",icon=folium.Icon("blue")).add_to(m)
+for idx, node_id in enumerate(st.session_state['points']):
+    lat, lon = nodes[node_id]
+    folium.Marker(location=(lat, lon), tooltip=f"Point {idx+1}", icon=folium.Icon("blue")).add_to(m)
+
+# Hiển thị các điểm đang chọn để tạo đường cấm
+for idx, point_coord in enumerate(st.session_state.get('forbidden_points', [])):
+    folium.Marker(location=point_coord, tooltip=f"Điểm cấm {idx+1}", icon=folium.Icon(color='red')).add_to(m)
 
 
 if len(st.session_state['points']) == 2:
     orig = st.session_state['points'][0]
     dest = st.session_state['points'][1]
 
-    # Find the nearest nodes in the graph
-    orig_node = ox.nearest_nodes(G,orig[1], orig[0])
-    dest_node = ox.nearest_nodes(G,dest[1], dest[0])
-    
-    route = Astar_algorithm(orig_node, dest_node)['path']
+    route = Astar_algorithm(orig, dest)['path']
     
 
     # Extract the edge geometries for the route
@@ -159,6 +192,18 @@ if len(st.session_state['points']) == 2:
         coords = [(lat, lon) for lon, lat in geom.coords]
         folium.PolyLine(coords, color='blue',tooltip="Too much smoothing?", weight=3).add_to(m)
 
+# Thêm chế độ chọn đường cấm
+mode = st.radio("Chọn chế độ thao tác:", ["Tìm đường", "Tạo đường cấm"], horizontal=True)
+
+# Hiển thị các đường cấm bằng màu đỏ
+for edge_coords in st.session_state.get('forbidden_edges', set()):
+    folium.PolyLine(locations=list(edge_coords), color='red', weight=5, tooltip="Đường cấm").add_to(m)
+
+# Nếu đang chọn chế độ tạo đường cấm và đã chọn 2 điểm, vẽ preview
+if mode == "Tạo đường cấm" and len(st.session_state['forbidden_points']) == 2:
+    pt1, pt2 = st.session_state['forbidden_points']
+    folium.PolyLine([pt1, pt2], color='red', dash_array='5, 5', weight=5, tooltip="Đường cấm (preview)").add_to(m)
+
 st.title("Điện Biên District Map")
 
 output = st_folium(m, width=1000, height=500,returned_objects=['last_clicked', 'zoom', 'center'])
@@ -166,11 +211,67 @@ if output and output['last_clicked']:
     st.session_state['zoom'] = output['zoom']
     st.session_state['center'] = output['center']['lat'], output['center']['lng'] 
     clicked_point = (output['last_clicked']['lat'], output['last_clicked']['lng'])
-    st.session_state['points'].append(clicked_point)
+
+    if mode == "Tạo đường cấm":
+        st.session_state['forbidden_points'].append(clicked_point)
+        if len(st.session_state['forbidden_points']) >= 2:
+            pt1, pt2 = st.session_state['forbidden_points']
+            edge_tuple = (pt1, pt2)
+            if edge_tuple in st.session_state['forbidden_edges'] or (pt2, pt1) in st.session_state['forbidden_edges']:
+                st.warning("Đường cấm này đã tồn tại!")
+            else:
+                st.session_state['forbidden_edges'].add(edge_tuple)
+                st.success("Đã tạo đường cấm mới!")
+            # Reset lại danh sách điểm để tạo đường cấm mới
+            st.session_state['forbidden_points'] = []
+    else:
+        # Chế độ tìm đường: vẫn tạo node mới như cũ
+        import time
+        new_node_id = int(time.time() * 1e6)
+        lat, lon = clicked_point
+        G.add_node(new_node_id, y=lat, x=lon)
+        nodes[new_node_id] = (lat, lon)
+        min_dist = float('inf')
+        nearest_node = None
+        for node_id, (y, x) in nodes.items():
+            if node_id == new_node_id:
+                continue
+            dist = calculate_distance((lat, lon), (y, x))
+            if dist < min_dist:
+                min_dist = dist
+                nearest_node = node_id
+        if nearest_node is not None:
+            from shapely.geometry import LineString
+            new_line = LineString([nodes[nearest_node], (lat, lon)])
+            intersects_forbidden = False
+            for edge in st.session_state.get('forbidden_edges', set()):
+                forbidden_line = LineString(edge)
+                if new_line.crosses(forbidden_line) or new_line.touches(forbidden_line):
+                    intersects_forbidden = True
+                    break
+            if intersects_forbidden:
+                st.warning("Không thể nối tới node gần nhất vì cạnh này giao với đường cấm!")
+            else:
+                G.add_edge(new_node_id, nearest_node, length=min_dist, oneway=False)
+                G.add_edge(nearest_node, new_node_id, length=min_dist, oneway=False)
+                graph[new_node_id].append((nearest_node, min_dist))
+                graph[nearest_node].append((new_node_id, min_dist))
+        st.session_state['points'].append(new_node_id)
+
+    # Rerun để cập nhật giao diện ngay lập tức sau mỗi lần click
     st.rerun()
+
 if st.button("Reset Points"):
     st.session_state['points'] = []
     st.session_state['zoom'] = DEFAULT_ZOOM
     st.session_state['center'] = DEFAULT_LOCATION
+    st.session_state['forbidden_points'] = []
+    st.rerun()
+
+if st.button("Xóa tất cả đường cấm"):
+    st.session_state['forbidden_edges'] = set()
+    # Cần load lại graph từ file để khôi phục các cạnh đã xóa
+    G, graph, nodes = load_graph()
+    st.success("Đã xóa tất cả đường cấm và khôi phục đồ thị!")
     st.rerun()
 
